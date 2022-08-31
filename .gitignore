@@ -2,6 +2,8 @@
 *.un~
 *.swp
 *.egg-info/
-data/
 nohup*
+data/
 output/
+checkpoint/
+config/
