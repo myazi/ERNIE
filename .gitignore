@@ -2,3 +2,6 @@
 *.un~
 *.swp
 *.egg-info/
+data/
+nohup*
+output/
