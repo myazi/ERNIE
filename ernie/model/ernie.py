@@ -24,7 +24,6 @@ import six
 import logging
 import paddle.fluid as fluid
 from io import open
-from paddle.fluid.layers import core
 
 from model.transformer_encoder import encoder, pre_process_layer
 
@@ -62,7 +61,8 @@ class ErnieModel(object):
                  input_mask,
                  config,
                  weight_sharing=True,
-                 use_fp16=False):
+                 use_fp16=False,
+                 model_name=""):
 
         self._emb_size = config['hidden_size']
         self._n_layer = config['num_hidden_layers']
@@ -86,8 +86,8 @@ class ErnieModel(object):
         self._pos_emb_name = "pos_embedding"
         self._sent_emb_name = "sent_embedding"
         self._task_emb_name = "task_embedding"
-        self._dtype = core.VarDesc.VarType.FP16 if use_fp16 else core.VarDesc.VarType.FP32
-        self._emb_dtype = core.VarDesc.VarType.FP32
+        self._dtype = "float16" if use_fp16 else "float32"
+        self._emb_dtype = "float32"
 
         # Initialize all weigths by truncated normal initializer, and all biases
         # will be initialized by constant zero by default.
@@ -95,17 +95,17 @@ class ErnieModel(object):
             scale=config['initializer_range'])
 
         self._build_model(src_ids, position_ids, sentence_ids, task_ids,
-                          input_mask)
+                          input_mask, model_name)
 
     def _build_model(self, src_ids, position_ids, sentence_ids, task_ids,
-                     input_mask):
+                     input_mask, model_name=""):
         # padding id in vocabulary must be set to 0
         emb_out = fluid.layers.embedding(
             input=src_ids,
             size=[self._voc_size, self._emb_size],
             dtype=self._emb_dtype,
             param_attr=fluid.ParamAttr(
-                name=self._word_emb_name, initializer=self._param_initializer),
+                name=model_name + self._word_emb_name, initializer=self._param_initializer),
             is_sparse=False)
         
         position_emb_out = fluid.layers.embedding(
@@ -113,14 +113,14 @@ class ErnieModel(object):
             size=[self._max_position_seq_len, self._emb_size],
             dtype=self._emb_dtype,
             param_attr=fluid.ParamAttr(
-                name=self._pos_emb_name, initializer=self._param_initializer))
+                name=model_name + self._pos_emb_name, initializer=self._param_initializer))
 
         sent_emb_out = fluid.layers.embedding(
             sentence_ids,
             size=[self._sent_types, self._emb_size],
             dtype=self._emb_dtype,
             param_attr=fluid.ParamAttr(
-                name=self._sent_emb_name, initializer=self._param_initializer))
+                name=model_name + self._sent_emb_name, initializer=self._param_initializer))
 
         emb_out = emb_out + position_emb_out
         emb_out = emb_out + sent_emb_out
@@ -131,15 +131,15 @@ class ErnieModel(object):
                 size=[self._task_types, self._emb_size],
                 dtype=self._emb_dtype,
                 param_attr=fluid.ParamAttr(
-                    name=self._task_emb_name,
+                    name=model_name + self._task_emb_name,
                     initializer=self._param_initializer))
 
             emb_out = emb_out + task_emb_out
 
         emb_out = pre_process_layer(
-            emb_out, 'nd', self._prepostprocess_dropout, name='pre_encoder')
+            emb_out, 'nd', self._prepostprocess_dropout, name=model_name + 'pre_encoder')
 
-        if self._dtype == core.VarDesc.VarType.FP16:
+        if self._dtype == "float16":
             emb_out = fluid.layers.cast(x=emb_out, dtype=self._dtype)
             input_mask = fluid.layers.cast(x=input_mask, dtype=self._dtype)
         self_attn_mask = fluid.layers.matmul(
@@ -167,8 +167,9 @@ class ErnieModel(object):
             preprocess_cmd="",
             postprocess_cmd="dan",
             param_initializer=self._param_initializer,
-            name='encoder')
-        if self._dtype == core.VarDesc.VarType.FP16:
+            model_name=model_name,
+            name=model_name+'encoder')
+        if self._dtype == "float16":
             self._enc_out = fluid.layers.cast(
                 x=self._enc_out, dtype=self._emb_dtype)
 
@@ -176,7 +177,14 @@ class ErnieModel(object):
     def get_sequence_output(self):
         return self._enc_out
 
-    def get_pooled_output(self):
+    def get_pooled_output_recall(self, model_name=""):
+        """Get the first feature of each sequence for classification"""
+        next_sent_feat = fluid.layers.slice(
+            input=self._enc_out, axes=[1], starts=[0], ends=[1])
+        next_sent_feat = fluid.layers.squeeze(next_sent_feat, axes=[1])
+        return next_sent_feat
+
+    def get_pooled_output(self, model_name=""):
         """Get the first feature of each sequence for classification"""
         next_sent_feat = fluid.layers.slice(
             input=self._enc_out, axes=[1], starts=[0], ends=[1])
@@ -185,8 +193,8 @@ class ErnieModel(object):
             size=self._emb_size,
             act="tanh",
             param_attr=fluid.ParamAttr(
-                name="pooled_fc.w_0", initializer=self._param_initializer),
-            bias_attr="pooled_fc.b_0")
+                name=model_name+"pooled_fc.w_0", initializer=self._param_initializer),
+            bias_attr=model_name+"pooled_fc.b_0")
         return next_sent_feat
 
     def get_lm_output(self, mask_label, mask_pos):

@@ -41,14 +41,21 @@ model_g.add_arg("task_id",           int,    0,       "task id")
 train_g = ArgumentGroup(parser, "training", "training options.")
 train_g.add_arg("epoch",             int,    3,       "Number of epoches for fine-tuning.")
 train_g.add_arg("learning_rate",     float,  5e-5,    "Learning rate used to train with warmup.")
+train_g.add_arg("end_learning_rate",     float,  0.0,    "End learning rate used to train with warmup. default is 0") ##rank
+
 train_g.add_arg("lr_scheduler",      str,    "linear_warmup_decay",
                 "scheduler of learning rate.", choices=['linear_warmup_decay', 'noam_decay'])
+train_g.add_arg("use_ema", bool, False, "Whether to use ema.") ##rank
+train_g.add_arg("ema_decay", float, 0.9999, "Decay rate for expoential moving average.") ##rank
 train_g.add_arg("weight_decay",      float,  0.01,    "Weight decay rate for L2 regularizer.")
 train_g.add_arg("warmup_proportion", float,  0.1,
                 "Proportion of training steps to perform linear learning rate warmup for.")
 train_g.add_arg("save_steps",        int,    10000,   "The steps interval to save checkpoints.")
 train_g.add_arg("validation_steps",  int,    1000,    "The steps interval to evaluate model performance.")
 train_g.add_arg("use_fp16",          bool,   False,   "Whether to use fp16 mixed precision training.")
+train_g.add_arg("use_recompute",          bool,   False,   "Whether to use recompute optimizer for training.") ##recall
+train_g.add_arg("use_mix_precision",          bool,   False,   "Whether to use mix-precision optimizer for training.") #recall
+train_g.add_arg("use_cross_batch",          bool,   False,   "Whether to use cross-batch for training.") ##recall
 train_g.add_arg("use_dynamic_loss_scaling",    bool,   True,   "Whether to use dynamic loss scaling.")
 train_g.add_arg("init_loss_scaling",           float,  102400,
                 "Loss scaling factor for mixed precision training, only valid when use_fp16 is enabled.")
@@ -62,6 +69,8 @@ train_g.add_arg("incr_ratio",                  float,  2.0,
                 "The multiplier to use when increasing the loss scaling.")
 train_g.add_arg("decr_ratio",                  float,  0.8,
                 "The less-than-one-multiplier to use when decreasing.")
+train_g.add_arg("margin",                  float,  1.0,
+                "margin of pairwise loss") ## rank
 
 
 
@@ -77,6 +86,9 @@ data_g.add_arg("test_set",            str,  None,  "Path to test data.")
 data_g.add_arg("dev_set",             str,  None,  "Path to validation data.")
 data_g.add_arg("vocab_path",          str,  None,  "Vocabulary path.")
 data_g.add_arg("max_seq_len",         int,  512,   "Number of words of the longest seqence.")
+data_g.add_arg("q_max_seq_len",       int,  32,   "Number of words of the longest seqence.") ##recall
+data_g.add_arg("p_max_seq_len",       int,  256,   "Number of words of the longest seqence.") ##recall
+data_g.add_arg("train_data_size",     int,  0,     "Number of training data's total examples. Set for distribute.") #recall
 data_g.add_arg("batch_size",          int,  32,    "Total examples' number in batch for training. see also --in_tokens.")
 data_g.add_arg("predict_batch_size",  int,  None,    "Total examples' number in batch for predict. see also --in_tokens.")
 data_g.add_arg("in_tokens",           bool, False,
@@ -109,6 +121,8 @@ run_type_g.add_arg("use_multi_gpu_test",           bool,   False, "Whether to pe
 run_type_g.add_arg("metrics",                      bool,   True,  "Whether to perform evaluation on test data set.")
 run_type_g.add_arg("shuffle",                      bool,   True,  "")
 run_type_g.add_arg("for_cn",                       bool,   True,  "model train for cn or for other langs.")
+run_type_g.add_arg("only_pointwise",               bool,   False,  "only use pointwise loss in training.") ##rank
+run_type_g.add_arg("only_pairwise",               bool,   False,  "only use pairwise loss in training.") ##rank
 
 parser.add_argument("--enable_ce", action='store_true', help="The flag indicating whether to run the task for continuous evaluation.")
 # yapf: enable

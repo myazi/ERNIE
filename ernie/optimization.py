@@ -25,7 +25,7 @@ import paddle.fluid as fluid
 from utils.fp16 import create_master_params_grads, master_param_to_train_param, apply_dynamic_loss_scaling
 
 
-def linear_warmup_decay(learning_rate, warmup_steps, num_train_steps):
+def linear_warmup_decay(learning_rate, warmup_steps, num_train_steps, end_learning_rate=0.0):
     """ Applies linear warmup of learning rate from 0 and decay to 0."""
     with fluid.default_main_program()._lr_schedule_guard():
         lr = fluid.layers.tensor.create_global_var(
@@ -45,7 +45,7 @@ def linear_warmup_decay(learning_rate, warmup_steps, num_train_steps):
                 decayed_lr = fluid.layers.learning_rate_scheduler.polynomial_decay(
                     learning_rate=learning_rate,
                     decay_steps=num_train_steps,
-                    end_learning_rate=0.0,
+                    end_learning_rate=end_learning_rate,
                     power=1.0,
                     cycle=False)
                 fluid.layers.tensor.assign(decayed_lr, lr)
@@ -67,7 +67,8 @@ def optimization(loss,
                  incr_every_n_steps=1000,
                  decr_every_n_nan_or_inf=2,
                  incr_ratio=2.0,
-                 decr_ratio=0.8):
+                 decr_ratio=0.8,
+                 end_learning_rate=0.0):
     if warmup_steps > 0:
         if scheduler == 'noam_decay':
             scheduled_lr = fluid.layers.learning_rate_scheduler\
@@ -75,7 +76,7 @@ def optimization(loss,
                          warmup_steps)
         elif scheduler == 'linear_warmup_decay':
             scheduled_lr = linear_warmup_decay(learning_rate, warmup_steps,
-                                               num_train_steps)
+                                               num_train_steps, end_learning_rate=end_learning_rate)
         else:
             raise ValueError("Unkown learning rate scheduler, should be "
                              "'noam_decay' or 'linear_warmup_decay'")

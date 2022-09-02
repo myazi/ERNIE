@@ -312,6 +312,7 @@ def encoder(enc_input,
             preprocess_cmd="n",
             postprocess_cmd="da",
             param_initializer=None,
+            model_name='',
             name=''):
     """
     The encoder is composed of a stack of identical layers returned by calling
@@ -336,6 +337,6 @@ def encoder(enc_input,
             name=name + '_layer_' + str(i))
         enc_input = enc_output
     enc_output = pre_process_layer(
-        enc_output, preprocess_cmd, prepostprocess_dropout, name="post_encoder")
+        enc_output, preprocess_cmd, prepostprocess_dropout, name=model_name+"post_encoder")
 
     return enc_output
