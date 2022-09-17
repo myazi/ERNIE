@@ -44,7 +44,7 @@ def create_model(args,
                  ernie_version="1.0",
                  preset_batch_size=80,
                  margin=1.0,
-                 ):
+                 pairwise_w=1.0):
     if is_classify:
         pyreader = fluid.layers.py_reader(
             capacity=50,
@@ -101,11 +101,6 @@ def create_model(args,
 
     assert is_classify != is_regression, 'is_classify or is_regression must be true and only one of them can be true'
     if is_prediction:
-        if is_classify:
-            # probs = fluid.layers.softmax(logits)
-            probs = logits
-        else:
-            probs = logits
         feed_targets_name = [
             src_ids.name, sent_ids.name, pos_ids.name, input_mask.name
         ]
@@ -115,107 +110,53 @@ def create_model(args,
 
     num_seqs = fluid.layers.create_tensor(dtype='int64')
     if is_classify:
-        
-        qid1 = L.expand(qids, [1, preset_batch_size])
-        qid2 = L.transpose(qid1, [1, 0])
+        ## pairwise loss
+        # margin = 1.0
 
-        # L.Print(qids, message='qids', summarize=-1)
-        # L.Print(qid1, message='qid1', summarize=-1)
-        # L.Print(qid2, message='qid2', summarize=-1)
+        batch_size = L.shape(qids)[0]
 
-        logits1 = L.expand(logits, [1, preset_batch_size])
-        logits2 = L.transpose(logits1, [1, 0])
+        qid1 = L.expand(qids, [1, preset_batch_size]) # [B * 1]
+        qid2 = L.transpose(qid1, [1, 0])  # [B * B]
 
-        labels1 = L.expand(labels, [1, preset_batch_size])
-        labels2 = L.transpose(labels1, [1, 0])
+        logits1 = L.expand(logits, [1, preset_batch_size]) # [B * 1]
+        logits2 = L.transpose(logits1, [1, 0])  # [B * B]
 
-        pn_labels = (labels1 - labels2) * L.equal(qid1, qid2)
-        zeros = L.zeros(shape=[preset_batch_size, preset_batch_size], dtype="int64")
+        # labels1 = L.expand(L.cast(labels, "float32"), [1, preset_batch_size]) # [B * 1]
+        labels1 = L.expand(labels, [1, preset_batch_size]) # [B * 1]
+        labels2 = L.transpose(labels1, [1, 0])  # [B * B]
+
+        # pn_labels = L.relu(labels1 - labels2) * L.cast(
+        #         L.equal(qid1, qid2), "float32")  # 只有同一个qid下的不同label为1
+        pn_labels = L.relu(L.cast(labels1 - labels2, "float32")) * L.cast(L.equal(qid1, qid2), "float32")  # 只有同一个qid下的不同label为1
         ones = L.ones(shape=[preset_batch_size, preset_batch_size], dtype="int64")
-        
+        ones_2 = ones * 2
+        qid_label_2 = L.cast(L.equal(labels1, ones_2), "float32")
 
-        def cal_hinge_loss(masked_pn_labels, pn_labels_all, margin=1.0):
-            hinge_loss = masked_pn_labels * L.relu(L.cast(logits2 - logits1 + margin, "float32"))
-            hinge_loss = L.reduce_sum(hinge_loss) / (L.reduce_sum(pn_labels_all) + 1e-8)
-            return hinge_loss
-        def cal_hinge_loss_martix(masked_pn_labels, pn_labels_all, margin_martix):
-            hinge_loss = masked_pn_labels * L.relu(L.cast(logits2 - logits1 + margin_martix, "float32"))
-            hinge_loss = L.reduce_sum(hinge_loss) / (L.reduce_sum(pn_labels_all) + 1e-8)
-            return hinge_loss
-            
-        ### 将pn_label_ij margin_ij 拆出 xx、xx、xx、xx四个纬度组pair
-        
-        margins = {
-            'margin_review': 5,
-            'margin_rel': 5,
-            'margin_orgin': 3,
-            'margin_hot': 2,
-            'margin_liry': 1
-        }
-        pn_labels_all = L.cast(L.less_than(zeros, pn_labels), "float32")
-        pn_labels_ij_no = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 100000, pn_labels), "float32")
-        pn_labels_ij_10000 = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 10000, pn_labels), "float32")
-        pn_labels_ij_review = pn_labels_ij_10000 - pn_labels_ij_no
+        zeros = L.zeros(shape=[preset_batch_size, preset_batch_size], dtype="float32")
+        pn_labels_2_01 = L.cast(L.greater_than(pn_labels * qid_label_2, zeros), "float32")  # 选择0-1、1-2、0-2的pair
+        pn_labels_1_0 = L.cast(L.greater_than(pn_labels * (1 - qid_label_2), zeros), "float32")
+        # L.Print(qids, message='qid', summarize=-1)
+        # L.Print(labels, message='labels', summarize=-1)
+        # L.Print(pn_labels, message='pn_labels', summarize=-1)
+        # L.Print(qids, message='qid', summarize=-1)
+        hinge_loss_2_01 = pn_labels_2_01 * L.relu(L.cast(logits2 - logits1 + margin, "float32"))  # hinge loss
+        hinge_loss_2_01 = L.reduce_sum(hinge_loss_2_01) / (L.reduce_sum(pn_labels_2_01) + 1e-5)  # 按照pair数量取平均
+        hinge_loss_1_0 = pn_labels_1_0 * L.relu(L.cast(logits2 - logits1 + margin, "float32"))  # hinge loss
+        hinge_loss_1_0 = L.reduce_sum(hinge_loss_1_0) / (L.reduce_sum(pn_labels_1_0) + 1e-5)  # 按照pair数量取平均
+        # L.Print(hinge_loss, message='hinge_loss', summarize=-1)
 
-        pn_labels_ij_rel = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 1000, pn_labels), "float32") - pn_labels_ij_10000 
-        pn_labels_ij_orgin = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 100, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_10000
-        pn_labels_ij_hot = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 10, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_orgin - pn_labels_ij_10000
-        pn_labels_ij_liry = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 1, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_orgin - pn_labels_ij_hot - pn_labels_ij_10000
+        # 设置labels为0-1label
+        zeros = L.zeros(shape=[preset_batch_size, 1], dtype="float32")
+        labels_01 = L.cast(L.greater_than(L.cast(labels, "float32"), zeros), "float32")
 
-        loss_pair_review = cal_hinge_loss(pn_labels_ij_review, pn_labels_all, margins["margin_review"])
-
-        loss_pair_rel = cal_hinge_loss(pn_labels_ij_rel, pn_labels_all, margins["margin_rel"])
-        loss_pair_orgin = cal_hinge_loss(pn_labels_ij_orgin, pn_labels_all, margins["margin_orgin"])
-        loss_pair_hot = cal_hinge_loss(pn_labels_ij_hot, pn_labels_all, margins["margin_hot"])
-        loss_pair_liry = cal_hinge_loss(pn_labels_ij_liry, pn_labels_all, margins["margin_liry"])
-        loss_pair = 10 * loss_pair_review + loss_pair_rel + loss_pair_orgin + loss_pair_hot + loss_pair_liry
-        
-        #L.Print(pn_labels_all, message='pn_labels_all', summarize=-1)
-        #L.Print(pn_labels_ij_rel, message='pn_labels_ij_rel', summarize=-1)
-        #L.Print(pn_labels_ij_orgin, message='pn_labels_ij_orgin', summarize=-1)
-        #L.Print(pn_labels_ij_hot, message='pn_labels_ij_hot', summarize=-1)
-        #L.Print(pn_labels_ij_liry, message='pn_labels_ij_liry', summarize=-1)
-
-        # pointwise loss
-        ones = L.ones(shape=[preset_batch_size, 1], dtype="int64")
-
-        pointwise_label_10000 = L.cast(L.less_than(ones * 10000, labels), "float32")
-        pointwise_label_all = L.cast(L.less_than(ones * 0, labels), "float32") - pointwise_label_10000
-        pointwise_mask_all = pointwise_label_all + L.cast(L.equal(labels, ones * 0), "float32")
-        loss_point = pointwise_mask_all * fluid.layers.sigmoid_cross_entropy_with_logits(logits, L.cast(pointwise_label_all, "float32")) ## 0-34pointloss
-        loss_point = L.reduce_sum(loss_point) / (L.reduce_sum(pointwise_mask_all) + 1e-10)
-
-        #L.Print(pointwise_label_all, message='pointwise_label_all', summarize=-1)
-        #L.Print(pointwise_mask_all, message='pointwise_mask_all', summarize=-1)
-        #L.Print(logits, message='logits', summarize=-1)
-        #L.Print(loss_point, message='loss_point', summarize=-1)
-        #L.Print(loss_pair, message='loss_pair', summarize=-1)
-        #L.Print(loss_pair_review, message='loss_pair_review', summarize=-1)
-        #L.Print(loss_pair_rel, message='loss_pair_rel', summarize=-1)
-        #L.Print(loss_pair_orgin, message='loss_pair_orgin', summarize=-1)
-        #L.Print(loss_pair_hot, message='loss_pair_hot', summarize=-1)
-        #L.Print(loss_pair_liry, message='loss_pair_liry', summarize=-1)
-        if args.only_pointwise:
-            loss = loss_point
-        elif args.only_pairwise:
-            loss = loss_pair * 0.1
-        else:
-            loss = (loss_point + 1.0 * loss_pair)
-
-        #L.Print(loss_point, message='loss_point', summarize=-1)
-        #L.Print(loss_pair, message='loss_pair', summarize=-1)
-        #L.Print(loss, message='loss', summarize=-1)
-        #L.Print(loss_pair_3_1, message='loss_pair_3_1', summarize=-1)
-        #L.Print(loss_pair_3_0, message='loss_paircc_3_0', summarize=-1)
-        #L.Print(loss_pair_2_1, message='loss_pair_2_1', summarize=-1)
-        #L.Print(loss_pair_2_0, message='loss_pair_2_0', summarize=-1)
-        #L.Print(loss_pair_1_0, message='loss_pair_1_0', summarize=-1)
+        ce_loss = fluid.layers.sigmoid_cross_entropy_with_logits(logits, L.cast(labels_01, "float32"))
+        loss = fluid.layers.mean(x=ce_loss) + pairwise_w * (hinge_loss_2_01 + 0.2 * hinge_loss_1_0)
 
         accuracy = fluid.layers.accuracy(
-            input=probs, label=L.cast(pointwise_label_all, "int64"), total=num_seqs)
+            input=probs, label=L.cast(labels_01, "int64"), total=num_seqs)
         graph_vars = {
             "loss": loss,
-            "probs": probs,
+            "probs": logits,
             "accuracy": accuracy,
             "labels": labels,
             "num_seqs": num_seqs,
@@ -226,7 +167,7 @@ def create_model(args,
         loss = fluid.layers.mean(x=cost)
         graph_vars = {
             "loss": loss,
-            "probs": probs,
+            "probs": logits,
             "labels": labels,
             "num_seqs": num_seqs,
             "qids": qids
@@ -533,15 +474,13 @@ def predict(exe,
             graph_vars,
             dev_count=1,
             is_classify=False,
-            is_regression=False,
-            score_f='test.score'
-            ):
+            is_regression=False):
     test_pyreader.start()
     qids, scores, probs = [], [], []
     preds = []
 
     fetch_list = [graph_vars["probs"].name, graph_vars["qids"].name]
-    output = open(score_f, 'w')
+    output = open('test.score', 'w')
 
     while True:
         try:
@@ -557,20 +496,12 @@ def predict(exe,
             if is_classify:
                 np_preds = np.argmax(np_probs, axis=1).astype(np.float32)
                 preds.extend(np_preds)
-                batch_score = np_probs[:].reshape(-1).tolist()
+                batch_score = np_probs[:, 1].reshape(-1).tolist()
                 for score in batch_score:
-                    output.write('{}\n'.format(score))
-                # print(np_preds)
-                # print('probs:', np_probs)
-                # print('batch score:', batch_score)
-
+                    output.write(str(score))
+                    output.write('\n')
             elif is_regression:
                 preds.extend(np_probs.reshape(-1))
-                batch_score = np_probs[:].reshape(-1).tolist()
-                for score in batch_score:
-                    output.write('{}\n'.format(score))
-                # print('regression probs:', np_probs)
-                # print('batch score:', batch_score)
 
             probs.append(np_probs)
 

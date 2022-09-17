@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 #   Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,10 +23,10 @@ import time
 import logging
 import numpy as np
 
+#import faiss
 from scipy.stats import pearsonr, spearmanr
 from six.moves import xrange
 import paddle.fluid as fluid
-import paddle.fluid.layers as L
 
 from model.ernie import ErnieModel
 
@@ -37,26 +35,28 @@ log = logging.getLogger(__name__)
 def create_model(args,
                  pyreader_name,
                  ernie_config,
+                 batch_size=16,
                  is_prediction=False,
                  task_name="",
                  is_classify=False,
                  is_regression=False,
-                 ernie_version="1.0",
-                 preset_batch_size=80,
-                 margin=1.0,
-                 ):
+                 save_part='all'):
     if is_classify:
         pyreader = fluid.layers.py_reader(
             capacity=50,
-            shapes=[[-1, args.max_seq_len, 1], [-1, args.max_seq_len, 1],
-                    [-1, args.max_seq_len, 1], [-1, args.max_seq_len, 1],
-                    [-1, args.max_seq_len, 1], [-1, 1], [-1, 1]],
-            dtypes=[
-                'int64', 'int64', 'int64', 'int64', 'float32', 'int64', 'int64'
-            ],
-            lod_levels=[0, 0, 0, 0, 0, 0, 0],
-            name=task_name + "_" + pyreader_name,
-            use_double_buffer=True)
+            shapes=[[batch_size, args.q_max_seq_len, 1], [batch_size, args.q_max_seq_len, 1],
+                [batch_size, args.q_max_seq_len, 1], [batch_size, args.q_max_seq_len, 1],
+                [batch_size, args.q_max_seq_len, 1],
+                [batch_size, args.p_max_seq_len, 1], [batch_size, args.p_max_seq_len, 1],
+                [batch_size, args.p_max_seq_len, 1], [batch_size, args.p_max_seq_len, 1],
+                [batch_size, args.p_max_seq_len, 1],
+                [batch_size, 1], [batch_size, 1]],
+        dtypes=['int64', 'int64', 'int64', 'int64', 'float32',
+                'int64', 'int64', 'int64', 'int64', 'float32',
+                'int64', 'int64'],
+        lod_levels=[0, 0, 0, 0, 0,  0, 0, 0, 0, 0,  0, 0],
+        name=pyreader_name,
+        use_double_buffer=True)
     elif is_regression:
         pyreader = fluid.layers.py_reader(
             capacity=50,
@@ -71,162 +71,136 @@ def create_model(args,
             name=task_name + "_" + pyreader_name,
             use_double_buffer=True)
 
-    (src_ids, sent_ids, pos_ids, task_ids, input_mask, labels,
-     qids) = fluid.layers.read_file(pyreader)
+    (src_ids_q, sent_ids_q, pos_ids_q, task_ids_q, input_mask_q,
+     src_ids_p, sent_ids_p, pos_ids_p, task_ids_p, input_mask_p,
+     labels, qids) = fluid.layers.read_file(pyreader)
+    """
+    fluid.layers.Print(src_ids_q, message='src_ids_q')
+    fluid.layers.Print(sent_ids_q, message='sent_ids_q')
+    fluid.layers.Print(pos_ids_q, message='pos_ids_q')
+    fluid.layers.Print(task_ids_q, message='task_ids_q')
+    fluid.layers.Print(input_mask_q, message='input_mask_q')
+    fluid.layers.Print(src_ids_p, message='src_ids_p')
+    fluid.layers.Print(sent_ids_p, message='sent_ids_p')
+    fluid.layers.Print(pos_ids_p, message='pos_ids_p')
+    fluid.layers.Print(task_ids_p, message='task_ids_p')
+    fluid.layers.Print(input_mask_p, message='input_mask_p')
+    """
 
-    ernie = ErnieModel(
-        src_ids=src_ids,
-        position_ids=pos_ids,
-        sentence_ids=sent_ids,
-        task_ids=task_ids,
-        input_mask=input_mask,
+    ernie_q = ErnieModel(
+        model_name='query_',
+        src_ids=src_ids_q,
+        position_ids=pos_ids_q,
+        sentence_ids=sent_ids_q,
+        task_ids=task_ids_q,
+        input_mask=input_mask_q,
+        config=ernie_config,
+        use_fp16=args.use_fp16)
+    ## pos para
+    ernie_p = ErnieModel(
+        model_name='titlepara_',
+        src_ids=src_ids_p,
+        position_ids=pos_ids_p,
+        sentence_ids=sent_ids_p,
+        task_ids=task_ids_p,
+        input_mask=input_mask_p,
         config=ernie_config,
         use_fp16=args.use_fp16)
 
-    cls_feats = ernie.get_pooled_output()
-    cls_feats = fluid.layers.dropout(
-        x=cls_feats,
-        dropout_prob=0.1,
-        dropout_implementation="upscale_in_train")
-    logits = fluid.layers.fc(
-        input=cls_feats,
-        size=args.num_labels,
-        param_attr=fluid.ParamAttr(
-            name=task_name + "_cls_out_one_w",
-            initializer=fluid.initializer.TruncatedNormal(scale=0.02)),
-        bias_attr=fluid.ParamAttr(
-            name=task_name + "_cls_out_one_b",
-            initializer=fluid.initializer.Constant(0.)))
-    probs = fluid.layers.sigmoid(logits)
+    q_cls_feats = ernie_q.get_pooled_output_recall("query_") #recall的pool与rank的不同
+    p_cls_feats = ernie_p.get_pooled_output_recall("titlepara_")
+    #p_cls_feats = fluid.layers.concat([pos_cls_feats, neg_cls_feats], axis=0)
+    #src_ids_p = fluid.layers.Print(src_ids_p, message='p: ')
+    #p_cls_feats = fluid.layers.Print(p_cls_feats, message='p: ')
 
-    assert is_classify != is_regression, 'is_classify or is_regression must be true and only one of them can be true'
+#    q_cls_feats = fluid.layers.dropout(
+#        x=q_cls_feats,
+#        dropout_prob=0.1,
+#        dropout_implementation="upscale_in_train")
+#    q_rep = fluid.layers.fc(
+#        input=q_cls_feats,
+#        size=128,
+#        param_attr=fluid.ParamAttr(
+#            name="q_cls_out_w",
+#            initializer=fluid.initializer.TruncatedNormal(scale=0.02)),
+#        bias_attr=fluid.ParamAttr(
+#            name="q_cls_out_b", initializer=fluid.initializer.Constant(0.)))
+#    ## for init sample neg model
+#    p_cls_feats = fluid.layers.dropout(
+#        x=p_cls_feats,
+#        dropout_prob=0.1,
+#        dropout_implementation="upscale_in_train")
+#    p_rep = fluid.layers.fc(
+#        input=p_cls_feats,
+#        size=128,
+#        param_attr=fluid.ParamAttr(
+#            name="p_cls_out_w",
+#            initializer=fluid.initializer.TruncatedNormal(scale=0.02)),
+#        bias_attr=fluid.ParamAttr(
+#            name="p_cls_out_b", initializer=fluid.initializer.Constant(0.)))
+
+    #multiply
+    logits = fluid.layers.elementwise_mul(q_cls_feats, p_cls_feats)
+    probs = fluid.layers.reduce_sum(logits, dim=-1)
     if is_prediction:
-        if is_classify:
-            # probs = fluid.layers.softmax(logits)
-            probs = logits
-        else:
-            probs = logits
-        feed_targets_name = [
-            src_ids.name, sent_ids.name, pos_ids.name, input_mask.name
-        ]
-        if ernie_version == "2.0":
-            feed_targets_name += [task_ids.name]
-        return pyreader, probs, feed_targets_name
+        if save_part == 'query':
+            feed_targets_name = [
+                src_ids_q.name, sent_ids_q.name, pos_ids_q.name, task_ids_q.name, input_mask_q.name
+            ]
+            return pyreader, feed_targets_name, q_cls_feats
+        elif save_part == 'para':
+            feed_targets_name = [
+                src_ids_p.name, sent_ids_p.name, pos_ids_p.name, task_ids_p.name, input_mask_p.name
+            ]
+            return pyreader, feed_targets_name, p_cls_feats
+        elif save_part == 'all':
+            feed_targets_name = [
+                src_ids_q.name, sent_ids_q.name, pos_ids_q.name, task_ids_q.name, input_mask_q.name,
+                src_ids_p.name, sent_ids_p.name, pos_ids_p.name, task_ids_p.name, input_mask_p.name
+            ]
+            return pyreader, feed_targets_name, [q_cls_feats, p_cls_feats, probs]
+    #fluid.layers.Print(probs, message='probs: ')
+    #logits2 = fluid.layers.elementwise_mul(x=q_rep, y=p_rep)
+    #fluid.layers.Print(logits2, message='logits2: ')
+    #probs2 = fluid.layers.reduce_sum(logits, dim=-1)
+    #fluid.layers.Print(probs2, message='probs2: ')
 
+    matrix_labels = fluid.layers.eye(batch_size, batch_size, dtype='float32')
+    matrix_labels.stop_gradient=True
+
+    #print('DEBUG:\tstart loss')
+    ce_loss, _ = fluid.layers.softmax_with_cross_entropy(
+           logits=logits, label=matrix_labels, soft_label=True, return_softmax=True)
+    loss = fluid.layers.mean(x=ce_loss)
+    #print('DEBUG:\tloss done')
+
+    matrix_labels = fluid.layers.argmax(matrix_labels, axis=-1)
+    matrix_labels = fluid.layers.reshape(x=matrix_labels, shape=[batch_size, 1])
     num_seqs = fluid.layers.create_tensor(dtype='int64')
+    accuracy = fluid.layers.accuracy(input=probs, label=matrix_labels, total=num_seqs)
+
     if is_classify:
-        
-        qid1 = L.expand(qids, [1, preset_batch_size])
-        qid2 = L.transpose(qid1, [1, 0])
-
-        # L.Print(qids, message='qids', summarize=-1)
-        # L.Print(qid1, message='qid1', summarize=-1)
-        # L.Print(qid2, message='qid2', summarize=-1)
-
-        logits1 = L.expand(logits, [1, preset_batch_size])
-        logits2 = L.transpose(logits1, [1, 0])
-
-        labels1 = L.expand(labels, [1, preset_batch_size])
-        labels2 = L.transpose(labels1, [1, 0])
-
-        pn_labels = (labels1 - labels2) * L.equal(qid1, qid2)
-        zeros = L.zeros(shape=[preset_batch_size, preset_batch_size], dtype="int64")
-        ones = L.ones(shape=[preset_batch_size, preset_batch_size], dtype="int64")
-        
-
-        def cal_hinge_loss(masked_pn_labels, pn_labels_all, margin=1.0):
-            hinge_loss = masked_pn_labels * L.relu(L.cast(logits2 - logits1 + margin, "float32"))
-            hinge_loss = L.reduce_sum(hinge_loss) / (L.reduce_sum(pn_labels_all) + 1e-8)
-            return hinge_loss
-        def cal_hinge_loss_martix(masked_pn_labels, pn_labels_all, margin_martix):
-            hinge_loss = masked_pn_labels * L.relu(L.cast(logits2 - logits1 + margin_martix, "float32"))
-            hinge_loss = L.reduce_sum(hinge_loss) / (L.reduce_sum(pn_labels_all) + 1e-8)
-            return hinge_loss
-            
-        ### 将pn_label_ij margin_ij 拆出 xx、xx、xx、xx四个纬度组pair
-        
-        margins = {
-            'margin_review': 5,
-            'margin_rel': 5,
-            'margin_orgin': 3,
-            'margin_hot': 2,
-            'margin_liry': 1
-        }
-        pn_labels_all = L.cast(L.less_than(zeros, pn_labels), "float32")
-        pn_labels_ij_no = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 100000, pn_labels), "float32")
-        pn_labels_ij_10000 = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 10000, pn_labels), "float32")
-        pn_labels_ij_review = pn_labels_ij_10000 - pn_labels_ij_no
-
-        pn_labels_ij_rel = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 1000, pn_labels), "float32") - pn_labels_ij_10000 
-        pn_labels_ij_orgin = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 100, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_10000
-        pn_labels_ij_hot = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 10, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_orgin - pn_labels_ij_10000
-        pn_labels_ij_liry = L.cast(L.less_than(zeros, pn_labels) * L.less_than(ones * 1, pn_labels), "float32") - pn_labels_ij_rel - pn_labels_ij_orgin - pn_labels_ij_hot - pn_labels_ij_10000
-
-        loss_pair_review = cal_hinge_loss(pn_labels_ij_review, pn_labels_all, margins["margin_review"])
-
-        loss_pair_rel = cal_hinge_loss(pn_labels_ij_rel, pn_labels_all, margins["margin_rel"])
-        loss_pair_orgin = cal_hinge_loss(pn_labels_ij_orgin, pn_labels_all, margins["margin_orgin"])
-        loss_pair_hot = cal_hinge_loss(pn_labels_ij_hot, pn_labels_all, margins["margin_hot"])
-        loss_pair_liry = cal_hinge_loss(pn_labels_ij_liry, pn_labels_all, margins["margin_liry"])
-        loss_pair = 10 * loss_pair_review + loss_pair_rel + loss_pair_orgin + loss_pair_hot + loss_pair_liry
-        
-        #L.Print(pn_labels_all, message='pn_labels_all', summarize=-1)
-        #L.Print(pn_labels_ij_rel, message='pn_labels_ij_rel', summarize=-1)
-        #L.Print(pn_labels_ij_orgin, message='pn_labels_ij_orgin', summarize=-1)
-        #L.Print(pn_labels_ij_hot, message='pn_labels_ij_hot', summarize=-1)
-        #L.Print(pn_labels_ij_liry, message='pn_labels_ij_liry', summarize=-1)
-
-        # pointwise loss
-        ones = L.ones(shape=[preset_batch_size, 1], dtype="int64")
-
-        pointwise_label_10000 = L.cast(L.less_than(ones * 10000, labels), "float32")
-        pointwise_label_all = L.cast(L.less_than(ones * 0, labels), "float32") - pointwise_label_10000
-        pointwise_mask_all = pointwise_label_all + L.cast(L.equal(labels, ones * 0), "float32")
-        loss_point = pointwise_mask_all * fluid.layers.sigmoid_cross_entropy_with_logits(logits, L.cast(pointwise_label_all, "float32")) ## 0-34pointloss
-        loss_point = L.reduce_sum(loss_point) / (L.reduce_sum(pointwise_mask_all) + 1e-10)
-
-        #L.Print(pointwise_label_all, message='pointwise_label_all', summarize=-1)
-        #L.Print(pointwise_mask_all, message='pointwise_mask_all', summarize=-1)
-        #L.Print(logits, message='logits', summarize=-1)
-        #L.Print(loss_point, message='loss_point', summarize=-1)
-        #L.Print(loss_pair, message='loss_pair', summarize=-1)
-        #L.Print(loss_pair_review, message='loss_pair_review', summarize=-1)
-        #L.Print(loss_pair_rel, message='loss_pair_rel', summarize=-1)
-        #L.Print(loss_pair_orgin, message='loss_pair_orgin', summarize=-1)
-        #L.Print(loss_pair_hot, message='loss_pair_hot', summarize=-1)
-        #L.Print(loss_pair_liry, message='loss_pair_liry', summarize=-1)
-        if args.only_pointwise:
-            loss = loss_point
-        elif args.only_pairwise:
-            loss = loss_pair * 0.1
-        else:
-            loss = (loss_point + 1.0 * loss_pair)
-
-        #L.Print(loss_point, message='loss_point', summarize=-1)
-        #L.Print(loss_pair, message='loss_pair', summarize=-1)
-        #L.Print(loss, message='loss', summarize=-1)
-        #L.Print(loss_pair_3_1, message='loss_pair_3_1', summarize=-1)
-        #L.Print(loss_pair_3_0, message='loss_paircc_3_0', summarize=-1)
-        #L.Print(loss_pair_2_1, message='loss_pair_2_1', summarize=-1)
-        #L.Print(loss_pair_2_0, message='loss_pair_2_0', summarize=-1)
-        #L.Print(loss_pair_1_0, message='loss_pair_1_0', summarize=-1)
-
-        accuracy = fluid.layers.accuracy(
-            input=probs, label=L.cast(pointwise_label_all, "int64"), total=num_seqs)
+        #ce_loss, probs = fluid.layers.softmax_with_cross_entropy(
+        #    logits=logits, label=labels, return_softmax=True)
+        #loss = fluid.layers.mean(x=ce_loss)
+        #accuracy = fluid.layers.accuracy(
+        #    input=probs, label=labels, total=num_seqs)
         graph_vars = {
             "loss": loss,
             "probs": probs,
             "accuracy": accuracy,
             "labels": labels,
             "num_seqs": num_seqs,
-            "qids": qids
+            "qids": qids,
+            "q_rep": q_cls_feats,
+            "p_rep": p_cls_feats
         }
     elif is_regression:
-        cost = fluid.layers.square_error_cost(input=logits, label=labels)
-        loss = fluid.layers.mean(x=cost)
+        #cost = fluid.layers.square_error_cost(input=logits, label=labels)
+        #loss = fluid.layers.mean(x=cost)
         graph_vars = {
             "loss": loss,
-            "probs": probs,
+            "probs": logits,
             "labels": labels,
             "num_seqs": num_seqs,
             "qids": qids
@@ -235,7 +209,7 @@ def create_model(args,
         raise ValueError(
             'unsupported fine tune mode. only supported classify/regression')
 
-    return pyreader, graph_vars
+    return pyreader, graph_vars, probs, q_cls_feats, p_cls_feats
 
 
 def evaluate_mrr(preds):
@@ -319,15 +293,17 @@ def evaluate_classify(exe,
     fetch_list = [
         graph_vars["loss"].name, graph_vars["accuracy"].name,
         graph_vars["probs"].name, graph_vars["labels"].name,
-        graph_vars["num_seqs"].name, graph_vars["qids"].name
+        graph_vars["num_seqs"].name, graph_vars["qids"].name,
+        graph_vars["q_rep"].name, graph_vars["p_rep"].name
     ]
+    #emb_file = open('emb_qp', 'w')
     while True:
         try:
             if use_multi_gpu_test:
-                np_loss, np_acc, np_probs, np_labels, np_num_seqs, np_qids = exe.run(
+                np_loss, np_acc, np_probs, np_labels, np_num_seqs, np_qids, q_rep, p_rep = exe.run(
                     fetch_list=fetch_list)
             else:
-                np_loss, np_acc, np_probs, np_labels, np_num_seqs, np_qids = exe.run(
+                np_loss, np_acc, np_probs, np_labels, np_num_seqs, np_qids, q_rep, p_rep = exe.run(
                     program=test_program, fetch_list=fetch_list)
             total_cost += np.sum(np_loss * np_num_seqs)
             total_acc += np.sum(np_acc * np_num_seqs)
@@ -336,21 +312,29 @@ def evaluate_classify(exe,
             if np_qids is None:
                 np_qids = np.array([])
             qids.extend(np_qids.reshape(-1).tolist())
-            batch_score = np_probs[:, 1].reshape(-1).tolist()
-            scores.extend(batch_score)
-            np_preds = np.argmax(np_probs, axis=1).astype(np.float32)
-            preds.extend(np_preds)
-            total_label_pos_num += np.sum(np_labels)
-            total_pred_pos_num += np.sum(np_preds)
-            total_correct_num += np.sum(np.dot(np_preds, np_labels))
+            batch_scores = np.diag(np_probs).reshape(-1).tolist()
+            scores.extend(batch_scores)
+            #for item in list(zip(q_rep, p_rep, batch_scores)):
+            #    _left = ' '.join([str(each) for each in item[0]])
+            #    _right = ' '.join([str(each) for each in item[1]])
+            #    emb_file.write(_left + '\t' + _right + '\t' + str(item[2]) + '\n')
+            #scores.extend(np_probs[:, 1].reshape(-1).tolist())
+            #np_preds = np.argmax(np_probs, axis=1).astype(np.float32)
+            #preds.extend(np_preds)
+            #total_label_pos_num += np.sum(np_labels)
+            #total_pred_pos_num += np.sum(np_preds)
+            #total_correct_num += np.sum(np.dot(np_preds, np_labels))
         except fluid.core.EOFException:
             test_pyreader.reset()
             break
-    return
-    time_end = time.time()
-    cost = total_cost / total_num_seqs
-    elapsed_time = time_end - time_begin
-
+    #for score in np_preds:
+    #    print (score)
+    #print ('---------------------')
+    #time_end = time.time()
+    #cost = total_cost / total_num_seqs
+    #elapsed_time = time_end - time_begin
+    #emb_file.close()
+    return None
     evaluate_info = ""
     if metric == 'acc_and_f1':
         ret = acc_and_f1(preds, labels)
@@ -526,59 +510,58 @@ def simple_accuracy(preds, labels):
     labels = np.array(labels)
     return (preds == labels).mean()
 
+def build_engine(para_emb_list, dim):
+    index = faiss.IndexFlatIP(dim)
+    # add paragraph embedding
+    p_emb_matrix = np.asarray(para_emb_list)
+    index.add(p_emb_matrix.astype('float32'))
+    #print ("insert done", file=sys.stderr)
+    return index
 
-def predict(exe,
+def predict(args,
+            exe,
             test_program,
             test_pyreader,
             graph_vars,
             dev_count=1,
             is_classify=False,
             is_regression=False,
-            score_f='test.score'
-            ):
+            output_item=0,
+            output_file_name='emb'):
+
     test_pyreader.start()
-    qids, scores, probs = [], [], []
     preds = []
 
-    fetch_list = [graph_vars["probs"].name, graph_vars["qids"].name]
-    output = open(score_f, 'w')
+    fetch_list = [graph_vars["q_rep"].name, graph_vars["p_rep"].name,]
+
+    if output_item == 0:
+        emb_file = open(output_file_name, 'w')
+    else:
+        para_embs = []
+        index_file = output_file_name
 
     while True:
         try:
-            if dev_count == 1:
-                np_probs, np_qids = exe.run(program=test_program,
+            q_rep, p_rep = exe.run(program=test_program,
                                             fetch_list=fetch_list)
-            else:
-                np_probs, np_qids = exe.run(fetch_list=fetch_list)
 
-            if np_qids is None:
-                np_qids = np.array([])
-            qids.extend(np_qids.reshape(-1).tolist())
-            if is_classify:
-                np_preds = np.argmax(np_probs, axis=1).astype(np.float32)
-                preds.extend(np_preds)
-                batch_score = np_probs[:].reshape(-1).tolist()
-                for score in batch_score:
-                    output.write('{}\n'.format(score))
-                # print(np_preds)
-                # print('probs:', np_probs)
-                # print('batch score:', batch_score)
-
-            elif is_regression:
-                preds.extend(np_probs.reshape(-1))
-                batch_score = np_probs[:].reshape(-1).tolist()
-                for score in batch_score:
-                    output.write('{}\n'.format(score))
-                # print('regression probs:', np_probs)
-                # print('batch score:', batch_score)
-
-            probs.append(np_probs)
+            if output_item == 0:
+                for item in q_rep:
+                    _left = ' '.join([str(each) for each in item])
+                    emb_file.write(_left + '\n')
+            elif output_item == 1:
+                for item in p_rep:
+                    para_embs.append(np.array(item, dtype='float32'))
 
         except fluid.core.EOFException:
             test_pyreader.reset()
             break
+    if output_item == 0:
+        emb_file.close()
 
-    probs = np.concatenate(probs, axis=0).reshape([len(preds), -1])
-    output.close()
-
-    return qids, preds, probs
+    elif output_item == 1:
+        print("predict para embs cnt: %s" % len(para_embs))
+        #para_embs = para_embs[:args.test_data_cnt]
+        print("cut para embs cnt: %s" % len(para_embs))
+        #engine = build_engine(para_embs, 768)
+        #faiss.write_index(engine, index_file)
