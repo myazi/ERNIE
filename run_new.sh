@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-# echo "running run.sh..."
+echo "running run.sh..."
 #export FLAGS_enable_parallel_graph=1
 #export FLAGS_eager_delete_tensor_gb=0
 #export FLAGS_sync_nccl_allreduce=1
@@ -44,7 +44,7 @@ DEV_PATH=./data/relv3_merge_sort_process_sort_v6_sort_1K
 
 lr=1e-5
 batch_size=8
-node=500
+node=1
 epoch=2
 train_exampls=`wc -l ${TRAIN_PATH} | awk -F " " '{print $1}'`
 echo ${train_exampls}
@@ -68,7 +68,7 @@ export CUDA_VISIBLE_DEVICES=0
                    --batch_size ${batch_size} \
                    --init_pretraining_params ${MODEL_PATH} \
                    --train_set ${TRAIN_PATH} \
-                   --dev_set 28420.test_v8 \
+                   --dev_set xxx.test_v8 \
                    --test_set $TEST_PATH \
                    --test_save ${TEST_PATH}_score \
                    --checkpoints ${CHECKPOINT_PATH} \
@@ -105,8 +105,8 @@ for((step=$new_save_steps;step<20000;step+=$new_save_steps));do
                     --batch_size ${batch_size} \
                     --init_checkpoint output/step_${step} \
                     --checkpoints output/ema_step_${step} \
-                    --train_set 28420.train_v8 \
-                    --dev_set 28420.test_v8 \
+                    --train_set xxx.train_v8 \
+                    --dev_set xxx.test_v8 \
                     --test_set ${TEST_PATH1}\
                     --test_save ${TEST_PATH1}.score.${step} \
                     --max_seq_len 384 \

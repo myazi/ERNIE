@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-# echo "running run.sh..."
+echo "running run.sh..."
 #export FLAGS_enable_parallel_graph=1
 #export FLAGS_eager_delete_tensor_gb=0
 #export FLAGS_sync_nccl_allreduce=1
@@ -21,14 +21,13 @@ MODEL_PATH=./checkpoint/tbkv_joint_spo_7601
 
 VOCAB_PATH=ernie/config/base/vocab.txt
 CONFIG_PATH=ernie/config/base/ernie_config.json
-
 #vocab size=5w (chr_word_mix)
+
 #VOCAB_PATH=ernie/config/base_5w/vocab.txt
 #CONFIG_PATH=ernie/config/base_5w/ernie_config.json
 
 TRAIN_PATH=./data/v5_baike_kv_qtp_V2_5_1_add_sample_process_test5_model_2_3_diff_all_sort_rule_sample_sort
 TEST_PATH=./data/v5_baike_kv_qtp_V2_5_1_add_sample_process_test5_model_2_3_diff_all_sort_rule_sample_sort_1K
-
 TEST_PATH1=./data/test_v6_kv.qtp
 
 ###将训练集拆部分出来做验证集
@@ -44,7 +43,7 @@ DEV_PATH=./data/v5_baike_kv_qtp_V2_5_1_add_sample_process_test5_model_2_3_diff_a
 
 lr=1e-5
 batch_size=8
-node=500
+node=1
 epoch=0
 train_exampls=`wc -l ${TRAIN_PATH} | awk -F " " '{print $1}'`
 echo ${train_exampls}
@@ -68,7 +67,7 @@ export CUDA_VISIBLE_DEVICES=0
                    --batch_size ${batch_size} \
                    --init_pretraining_params ${MODEL_PATH} \
                    --train_set ${TRAIN_PATH} \
-                   --dev_set 28420.test_v8 \
+                   --dev_set xxx.test_v8 \
                    --test_set $TEST_PATH \
                    --test_save ${TEST_PATH}_score \
                    --checkpoints ${CHECKPOINT_PATH} \
